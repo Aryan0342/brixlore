@@ -1,0 +1,404 @@
+// Prisma schema for PostgreSQL – streaming platform
+// https://pris.ly/d/prisma-schema
+// For Neon: use the Pooled connection string from Neon dashboard (includes ?sslmode=require).
+
+generator client {
+  provider      = "prisma-client-js"
+  binaryTargets = ["native", "rhel-openssl-3.0.x"]
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ---------------------------------------------------------------------------
+// Enums
+// ---------------------------------------------------------------------------
+
+enum Platform {
+  ANDROID
+  IOS
+  WEB
+}
+
+enum DownloadStatus {
+  AUTHORIZED
+  DOWNLOADED
+  EXPIRED
+  REVOKED
+}
+
+enum SubscriptionStatus {
+  ACTIVE
+  CANCELLED
+  EXPIRED
+}
+
+enum ContentType {
+  MOVIE
+  DOCUMENTARY
+  SERIES
+  ANIMATION
+  TRAILER
+  SHORT
+}
+
+enum SupportPriority {
+  LOW
+  MEDIUM
+  HIGH
+  URGENT
+}
+
+enum SupportStatus {
+  OPEN
+  IN_PROGRESS
+  RESOLVED
+  CLOSED
+}
+
+// ---------------------------------------------------------------------------
+// User
+// ---------------------------------------------------------------------------
+
+model User {
+  id               String   @id @default(cuid())
+  email            String   @unique
+  name             String?
+  phone            String?
+  bio              String?
+  passwordHash     String?
+  role             String   @default("user")
+  stripeCustomerId String?  @unique
+  createdAt        DateTime @default(now())
+  updatedAt        DateTime @updatedAt
+
+  subscriptions       Subscription[]
+  devices             Device[]
+  downloads           Download[]
+  viewHistory         ViewHistory[]
+  refreshTokens       RefreshToken[]
+  passwordResetTokens PasswordResetToken[]
+  supportReplies      SupportReply[]
+  preferences         UserPreferences?
+
+  @@index([email])
+}
+
+model UserPreferences {
+  id                  String   @id @default(cuid())
+  userId              String   @unique
+  playbackQuality     String   @default("Auto")
+  autoplayNext        Boolean  @default(true)
+  skipRecaps          Boolean  @default(false)
+  subtitlesDefault    Boolean  @default(true)
+  notifyNewReleases   Boolean  @default(true)
+  notifyAccountAlerts Boolean  @default(true)
+  notifyProductTips   Boolean  @default(false)
+  twoFactorEnabled    Boolean  @default(false)
+  createdAt           DateTime @default(now())
+  updatedAt           DateTime @updatedAt
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+}
+
+model PasswordResetToken {
+  id        String    @id @default(cuid())
+  userId    String
+  tokenHash String
+  expiresAt DateTime
+  usedAt    DateTime?
+  createdAt DateTime  @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([tokenHash])
+  @@index([userId])
+  @@index([expiresAt])
+}
+
+model RefreshToken {
+  id        String    @id @default(cuid())
+  userId    String
+  tokenHash String // hash of the JWT for lookup/revocation
+  expiresAt DateTime
+  revokedAt DateTime?
+  createdAt DateTime  @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([tokenHash])
+  @@index([userId])
+  @@index([expiresAt])
+}
+
+// ---------------------------------------------------------------------------
+// Plan & Subscription
+// ---------------------------------------------------------------------------
+
+model Plan {
+  id                  String   @id @default(cuid())
+  name                String
+  price               Decimal  @db.Decimal(10, 2)
+  duration            String // e.g. "MONTHLY", "YEARLY" or duration in months
+  deviceLimit         Int
+  offlineAllowed      Boolean  @default(false)
+  maxOfflineDownloads Int      @default(0)
+  isPopular           Boolean  @default(false)
+  perks               String[] @default([])
+  stripePriceId       String? // Stripe Price ID for checkout
+  createdAt           DateTime @default(now())
+  updatedAt           DateTime @updatedAt
+
+  subscriptions Subscription[]
+
+  @@index([name])
+}
+
+model Subscription {
+  id                   String             @id @default(cuid())
+  userId               String
+  planId               String
+  status               SubscriptionStatus @default(ACTIVE)
+  stripeSubscriptionId String?            @unique
+  startDate            DateTime
+  endDate              DateTime
+  createdAt            DateTime           @default(now())
+  updatedAt            DateTime           @updatedAt
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+  plan Plan @relation(fields: [planId], references: [id], onDelete: Restrict)
+
+  @@index([userId])
+  @@index([planId])
+  @@index([status])
+  @@index([stripeSubscriptionId])
+}
+
+// ---------------------------------------------------------------------------
+// Category & Video
+// ---------------------------------------------------------------------------
+
+model Category {
+  id        String   @id @default(cuid())
+  name      String
+  slug      String   @unique
+  parentId  String?
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  parent       Category?     @relation("CategoryHierarchy", fields: [parentId], references: [id], onDelete: SetNull)
+  children     Category[]    @relation("CategoryHierarchy")
+  contents     Content[]
+  legacyVideos LegacyVideo[]
+
+  @@index([slug])
+  @@index([parentId])
+}
+
+model Content {
+  id           String      @id @default(cuid())
+  categoryId   String?
+  title        String
+  description  String?
+  type         ContentType
+  thumbnailUrl String
+  posterUrl    String?
+  releaseYear  Int
+  ageRating    String
+  duration     Int?
+  trailerId    String?
+  isPublished  Boolean     @default(false)
+  createdAt    DateTime    @default(now())
+  updatedAt    DateTime    @updatedAt
+
+  category   Category? @relation(fields: [categoryId], references: [id], onDelete: SetNull)
+  seasons    Season[]
+  episodes   Episode[]
+  trailer    Content?  @relation("ContentTrailer", fields: [trailerId], references: [id], onDelete: SetNull)
+  trailerFor Content[] @relation("ContentTrailer")
+
+  @@index([categoryId])
+  @@index([type])
+}
+
+// Legacy table retained for migration/backfill.
+model LegacyVideo {
+  id           String    @id @default(cuid())
+  categoryId   String
+  title        String
+  description  String?
+  duration     Int
+  thumbnailUrl String?
+  streamUrl    String?
+  publishedAt  DateTime?
+  createdAt    DateTime  @default(now())
+  updatedAt    DateTime  @updatedAt
+
+  category Category @relation(fields: [categoryId], references: [id], onDelete: Restrict)
+
+  @@index([categoryId])
+  @@index([publishedAt])
+  @@map("Video")
+}
+
+model Season {
+  id           String   @id @default(cuid())
+  contentId    String
+  seasonNumber Int
+  title        String
+  description  String?
+  createdAt    DateTime @default(now())
+
+  content  Content   @relation(fields: [contentId], references: [id], onDelete: Cascade)
+  episodes Episode[]
+
+  @@unique([contentId, seasonNumber])
+  @@index([contentId])
+}
+
+model Episode {
+  id            String   @id @default(cuid())
+  contentId     String
+  seasonId      String?
+  episodeNumber Int
+  title         String
+  description   String?
+  duration      Int
+  videoUrl      String
+  hlsUrl        String?
+  thumbnailUrl  String?
+  createdAt     DateTime @default(now())
+
+  content     Content       @relation(fields: [contentId], references: [id], onDelete: Cascade)
+  season      Season?       @relation(fields: [seasonId], references: [id], onDelete: SetNull)
+  downloads   Download[]
+  viewHistory ViewHistory[]
+
+  @@unique([contentId, seasonId, episodeNumber])
+  @@index([contentId])
+  @@index([seasonId])
+}
+
+// ---------------------------------------------------------------------------
+// Site Pages (editable legal pages)
+// ---------------------------------------------------------------------------
+
+model SitePage {
+  id        String   @id @default(cuid())
+  slug      String   @unique
+  title     String
+  content   String   @default("")
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([slug])
+}
+
+// ---------------------------------------------------------------------------
+// Support requests (Contact Us)
+// ---------------------------------------------------------------------------
+
+model SupportRequest {
+  id        String          @id @default(cuid())
+  name      String
+  email     String
+  subject   String
+  message   String
+  status    SupportStatus   @default(OPEN)
+  priority  SupportPriority @default(MEDIUM)
+  createdAt DateTime        @default(now())
+  updatedAt DateTime        @updatedAt
+
+  replies SupportReply[]
+
+  @@index([email])
+  @@index([status])
+  @@index([priority])
+  @@index([createdAt])
+}
+
+model SupportReply {
+  id               String   @id @default(cuid())
+  supportRequestId String
+  adminUserId      String?
+  message          String
+  createdAt        DateTime @default(now())
+
+  supportRequest SupportRequest @relation(fields: [supportRequestId], references: [id], onDelete: Cascade)
+  adminUser      User?          @relation(fields: [adminUserId], references: [id], onDelete: SetNull)
+
+  @@index([supportRequestId])
+  @@index([adminUserId])
+}
+
+// ---------------------------------------------------------------------------
+// Device
+// ---------------------------------------------------------------------------
+
+model Device {
+  id               String   @id @default(cuid())
+  userId           String
+  platform         Platform
+  deviceIdentifier String
+  lastActiveAt     DateTime @default(now())
+  createdAt        DateTime @default(now())
+  updatedAt        DateTime @updatedAt
+
+  user      User       @relation(fields: [userId], references: [id], onDelete: Cascade)
+  downloads Download[]
+
+  @@unique([userId, deviceIdentifier])
+  @@index([userId])
+  @@index([platform])
+}
+
+// ---------------------------------------------------------------------------
+// Download
+// ---------------------------------------------------------------------------
+
+model Download {
+  id        String         @id @default(cuid())
+  userId    String
+  episodeId String
+  deviceId  String
+  status    DownloadStatus @default(AUTHORIZED)
+  expiresAt DateTime
+  createdAt DateTime       @default(now())
+  updatedAt DateTime       @updatedAt
+
+  user    User    @relation(fields: [userId], references: [id], onDelete: Cascade)
+  episode Episode @relation(fields: [episodeId], references: [id], onDelete: Cascade)
+  device  Device  @relation(fields: [deviceId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@index([episodeId])
+  @@index([deviceId])
+  @@index([status])
+  @@index([expiresAt])
+}
+
+// ---------------------------------------------------------------------------
+// ViewHistory
+// ---------------------------------------------------------------------------
+
+model ViewHistory {
+  id        String   @id @default(cuid())
+  userId    String
+  episodeId String
+  watchedAt DateTime @default(now())
+  progress  Int      @default(0) // seconds watched
+  completed Boolean  @default(false)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  user    User    @relation(fields: [userId], references: [id], onDelete: Cascade)
+  episode Episode @relation(fields: [episodeId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@index([episodeId])
+  @@index([userId, episodeId])
+}
